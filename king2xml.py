@@ -1,6 +1,7 @@
+# king2xml.py
 import sys
 import os
-import requests  # Use the requests library for downloading files
+import requests
 import re
 
 def download_files(position, languages):
@@ -25,17 +26,42 @@ def cleanup_files():
         if filename.endswith(".php") or filename.endswith(".xml") or filename.startswith("freq"):
             os.remove(filename)
 
+def merge_files(output_filename, languages, omit_list=[]):
+    """
+    Merges downloaded PHP files for specified languages into a single PHP file.
+    Also creates a map of channel names to their languages, excluding omitted channels.
+    """
+    channel_languages = {}  # Dictionary to store channel name -> languages mapping
 
-def merge_files(output_filename, languages):
-    """
-    Merges only downloaded PHP files for specified languages into a single PHP file for processing.
-    """
+    # First pass: collect channel names and their languages
+    for lang in languages:
+        filename = f"freqs_{lang}.php"
+        if os.path.exists(filename):
+            with open(filename, "r", encoding="utf-8") as infile:
+                for line in infile:
+                    if "title=\"Id:" in line:
+                        channel_name = line.split(':', 1)[1].lstrip().split('"', 1)[0]
+                        # Skip channels that are in the omit list
+                        if channel_name not in omit_list:
+                            if channel_name in channel_languages:
+                                if lang not in channel_languages[channel_name]:
+                                    channel_languages[channel_name].append(lang)
+                            else:
+                                channel_languages[channel_name] = [lang]
+
+    # Save channel-language mapping
+    with open("channel_languages.txt", "w", encoding="utf-8") as mapfile:
+        for channel, langs in channel_languages.items():
+            mapfile.write(f"{channel}|||{'|'.join(langs)}\n")
+
+    # Second pass: merge files
     with open(output_filename, "w", encoding="utf-8") as outfile:
         for lang in languages:
             filename = f"freqs_{lang}.php"
             if os.path.exists(filename):
                 with open(filename, "r", encoding="utf-8") as infile:
                     outfile.write(infile.read())
+
     print(f"Merged specified language files into {output_filename}.")
 
 def process_file_with_script(input_filename, output_filename, source):
@@ -47,42 +73,58 @@ def process_file_with_script(input_filename, output_filename, source):
 def post_process_xml(input_filename, output_filename, omit_list=[]):
     tv_channels = []
     radio_channels = []
-    channel_counter = 1  # Numeracja startowa
+    channel_counter = 1
+
+    # Load channel-language mapping
+    channel_languages = {}
+    if os.path.exists("channel_languages.txt"):
+        with open("channel_languages.txt", "r", encoding="utf-8") as mapfile:
+            for line in mapfile:
+                channel, langs = line.strip().split("|||")
+                channel_languages[channel] = langs.split("|")
 
     with open(input_filename, "r", encoding="utf-8") as infile:
         for line in infile:
-            # Zamień <pol>V</pol> na <pol>v</pol> i <pol>H</pol> na <pol>h</pol>
+            # Standardize polarization
             line = re.sub(r"<pol>V</pol>", "<pol>v</pol>", line)
             line = re.sub(r"<pol>H</pol>", "<pol>h</pol>", line)
 
-            # Pomijaj kanały bez nazw
+            # Skip channels without names
             if '<name></name>' in line:
                 continue
 
-            # Pobieranie nazwy kanału
+            # Get channel name
             name_match = re.search(r"<name>(.*?)</name>", line)
             if name_match:
                 channel_name = name_match.group(1).strip()
-                # Pomijaj kanały, jeśli ich nazwa znajduje się na liście `omit_list`
                 if channel_name in omit_list:
                     continue
-            else:
-                continue  # Pomijaj, jeśli kanał nie ma nazwy
 
-            # Sprawdź, czy to kanał radiowy, czy telewizyjny
-            if '<type>radio</type>' in line:
-                # Dodaj numer kanału do kanału radiowego i dodaj do listy radiowej
-                line = line.replace("NR", str(channel_counter))
-                radio_channels.append(line)
-            else:
-                # Dodaj numer kanału do kanału TV i dodaj do listy TV
-                line = line.replace("NR", str(channel_counter))
-                tv_channels.append(line)
-            channel_counter += 1  # Inkrementuj licznik po każdym kanale
+                # Format channel number
+                formatted_number = f"{channel_counter:04d}"
 
-    # Zapisz do pliku, kanały TV przed radiowymi
+                # Get languages for this channel
+                langs = channel_languages.get(channel_name, [])
+                lang_str = f"[{','.join(langs)}] " if langs else ""
+
+                # Create new channel name with number and languages
+                new_name = f"{formatted_number} {lang_str}{channel_name}"
+
+                # Update both the channel name and number attribute
+                line = re.sub(r"<name>.*?</name>", f"<name>{new_name}</name>", line)
+                line = re.sub(r'number="NR"', f'number="{channel_counter}"', line)
+
+                # Add to appropriate list
+                if '<type>radio</type>' in line:
+                    radio_channels.append(line)
+                else:
+                    tv_channels.append(line)
+
+                channel_counter += 1
+
+    # Write processed channels to file
     with open(output_filename, "w", encoding="utf-8") as outfile:
-        for channel in tv_channels + radio_channels:  # TV najpierw, potem radio
+        for channel in tv_channels + radio_channels:
             outfile.write(channel)
 
 def finalize_xml(output_filename):
@@ -105,39 +147,42 @@ def main():
         print("Usage: python king2xml.py <position> <source> <lang1> <lang2> ... [--omit <name1,name2,...>]")
         sys.exit(1)
 
-    # Pobieramy argumenty
     position = sys.argv[1]
     source = sys.argv[2]
-    languages = [arg for arg in sys.argv[3:] if not arg.startswith("--")]
 
-    # Sprawdzenie, czy `--omit` zostało podane
+    # Oddziel języki od parametrów --omit
+    languages = []
     omit_list = []
-    if "--omit" in sys.argv:
-        omit_index = sys.argv.index("--omit") + 1
-        if omit_index < len(sys.argv):
-            omit_list = sys.argv[omit_index].split(",")
+    i = 3
+    while i < len(sys.argv):
+        if sys.argv[i] == "--omit":
+            if i + 1 < len(sys.argv):
+                omit_list = sys.argv[i + 1].split(",")
+                break
+            else:
+                print("Error: --omit requires a list of channels")
+                sys.exit(1)
+        else:
+            languages.append(sys.argv[i])
+        i += 1
 
-    # Nazwy plików wyjściowych
     merged_filename = f"tv-{position}-fta-langs.php"
     intermediate_xml_filename = f"tv-{position}-fta-langs.xml"
     final_output_filename = f"TV-{position}-FTA-langs-{'-'.join(languages)}.xml"
 
-    # Główna logika
-    cleanup_files()  # Cleanup old files
-    download_files(position, languages)  # Download only specified languages
-    merge_files(merged_filename, languages)  # Merge only files for specified languages
-    process_file_with_script(merged_filename, intermediate_xml_filename, source)  # Process the merged file
-    post_process_xml(intermediate_xml_filename, final_output_filename, omit_list)  # Post-process the XML
-    finalize_xml(final_output_filename)  # Add XML header and footer
+    cleanup_files()
+    download_files(position, languages)
+    merge_files(merged_filename, languages, omit_list)
+    process_file_with_script(merged_filename, intermediate_xml_filename, source)
+    post_process_xml(intermediate_xml_filename, final_output_filename, omit_list)
+    finalize_xml(final_output_filename)
 
-    # Przeniesienie finalnego pliku do katalogu wynikowego
     output_dir = "ONEPOSMULTILANG/"
     if not os.path.exists(output_dir):
         os.mkdir(output_dir)
     os.rename(final_output_filename, os.path.join(output_dir, final_output_filename))
     print(f"Final XML saved to {output_dir}{final_output_filename}")
 
-    # Cleanup intermediate files
     cleanup_files()
     print("Cleanup completed.")
 
