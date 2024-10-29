@@ -8,3 +8,4 @@ python king2xml2.py 13E 1 pol --omit NETFLIX
 
 
 <img width="964" alt="diseqc" src="https://github.com/stpf99/sat-ip-dlna-playlist/blob/3715272dbfaef6d198f6110dc5660c87b1391b8b/gui.png">
+/TRIAX_TSS400- DLNA-channels- xml-wizard.py
